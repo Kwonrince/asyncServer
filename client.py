@@ -16,6 +16,28 @@ db = mongo_client['task_db']
 tasks_collection = db['tasks']
 app = FastAPI()
 
+def setup_indexes():
+    existing_indexes = tasks_collection.index_information()
+
+    # 필요한 인덱스 정의
+    required_indexes = [
+        {"fields": [("status", 1), ("sequence", 1)], "options": {}},
+        {"fields": [("task_id", 1)], "options": {"unique": True}},
+        {"fields": [("completed_at", 1)], "options": {"expireAfterSeconds": 604800}},  # 7일 TTL
+    ]
+
+    for index in required_indexes:
+        index_name = "_".join([f"{field[0]}_{field[1]}" for field in index["fields"]])
+        if index_name not in existing_indexes:
+            tasks_collection.create_index(index["fields"], **index["options"])
+            logger.info(f"Index {index_name} created successfully.")
+        else:
+            logger.info(f"Index {index_name} already exists.")
+
+    logger.info("Index setup complete.")
+
+setup_indexes()
+
 class ProcessRequest(BaseModel):
    data: str
 

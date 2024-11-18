@@ -15,10 +15,11 @@ tasks_collection = db["tasks"]
 # Celery 설정
 app = Celery('tasks', 
              broker='amqp://guest:guest@localhost:5672//',
-             backend='rpc://')
+             backend='mongodb://localhost:27017/celery_results')
 
 # Server URL
 SERVER_URL = "http://localhost:8012/process"
+MAX_RETRY_COUNT = 3
 
 @app.task(bind=True)
 def process_task(self, data: str):
@@ -70,19 +71,36 @@ def process_task(self, data: str):
             return {'status': 'success', 'task_id': next_task['task_id']}
 
         except Exception as e:
-            # 작업 실패 복구
+            # 작업 실패 복구 및 celery 태스크 재등록
+            retry_count = next_task.get('retry_count', 0)
+            if retry_count + 1 > MAX_RETRY_COUNT:
+                tasks_collection.update_one(
+                    {'_id': next_task['_id']},
+                    {
+                        '$set': {
+                            'status': 'failed',
+                            'locked_at': None,
+                            'locked_by': None,
+                            'error_message': f"Max retries exceeded: {e}"
+                        }
+                    }
+                )
+                logger.error(f"Task {next_task['_id']} permanently failed after {MAX_RETRY_COUNT} retries.")
+                return {'status': 'failed', 'task_id': next_task['_id'], 'error': str(e)}
             tasks_collection.update_one(
                 {'_id': next_task['_id']},
                 {
                     '$set': {
                         'status': 'pending',
                         'locked_at': None,
-                        'locked_by': None
-                    }
+                        'locked_by': None,
+                    },
+                    '$inc': {'retry_count': 1}  # 재시도 횟수 증가
                 }
             )
-            logger.error(f"Task {next_task['task_id']} failed: {e}")
-            return {'status': 'error', 'task_id': next_task['task_id'], 'error': str(e)}
+            process_task.apply_async(kwargs={"data": next_task['data']}, countdown=60)
+            logger.error(f"Task {next_task['_id']} failed. Retrying {retry_count + 1}/{MAX_RETRY_COUNT}: {e}")
+            return {'status': 'error', 'task_id': next_task['_id'], 'retry_count': retry_count + 1, 'error': str(e)}
 
     except Exception as e:
         logger.error(f"Error processing task: {e}")
