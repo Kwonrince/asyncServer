@@ -2,7 +2,6 @@ from celery import Celery
 import time
 from pymongo import MongoClient
 from datetime import datetime
-import pika
 
 mongo_client = MongoClient('mongodb://localhost:27017/')
 db = mongo_client['task_db']
@@ -34,7 +33,7 @@ def process_task(self, data: str):
         
         if next_task:
             try:
-                time.sleep(10)  # 작업 시뮬레이션
+                time.sleep(3)  # 작업 시뮬레이션
                 
                 # 작업 완료 처리
                 tasks_collection.update_one(
