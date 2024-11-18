@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import uvicorn
 import logging
-from server import process_task
+from task import process_task
 from pymongo import MongoClient
 from datetime import datetime
 
