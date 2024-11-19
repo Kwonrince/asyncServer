@@ -47,24 +47,21 @@ class ProcessRequest(BaseModel):
 def process_data(request: ProcessRequest):
     try:
         # 시퀀스 카운터 증가 (락 사용)
-        counter = tasks_collection.find_one_and_update(
-            {"_id": "counter"},
-            [
-                {
-                    "$set": {
-                        "value": {
-                            "$cond": [
-                                { "$gte": ["$value", 999999] },  # 100만 되면 리셋
-                                1,
-                                { "$add": ["$value", 1] }
-                            ]
-                        }
-                    }
-                }
-            ],
-            upsert=True,
-            return_document=True
-        )
+        current = tasks_collection.find_one({"_id": "counter"})
+        if current and current.get("value", 0) >= 999999:
+            counter = tasks_collection.find_one_and_update(
+                {"_id": "counter"},
+                {"$set": {"value": 1}},
+                return_document=True,
+                upsert=True
+            )
+        else:
+            counter = tasks_collection.find_one_and_update(
+                {"_id": "counter"},
+                {"$inc": {"value": 1}},
+                return_document=True,
+                upsert=True
+            )
         sequence = counter["value"]
 
         task = process_task.delay(request.data, sequence)
