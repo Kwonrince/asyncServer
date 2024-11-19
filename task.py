@@ -7,11 +7,6 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# MongoDB 설정
-mongo_client = MongoClient("mongodb://localhost:27017/")
-db = mongo_client["task_db"]
-tasks_collection = db["tasks"]
-
 # Celery 설정
 app = Celery('tasks', 
              broker='amqp://guest:guest@localhost:5672//',
