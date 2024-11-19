@@ -34,7 +34,7 @@ class RequestClient:
 
 if __name__ == "__main__":
     client = RequestClient("http://localhost:8010", max_workers=4)
-    data_list = [f"test_data_{i}" for i in range(0,50)]
+    data_list = [f"test_data_{i}" for i in range(0,20)]
     results = client.process_multiple(data_list)
     
     for result in results:

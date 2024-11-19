@@ -36,37 +36,55 @@ def setup_indexes():
 
     logger.info("Index setup complete.")
 
-setup_indexes()
+@app.on_event("startup")
+def startup_event():
+    setup_indexes()
 
 class ProcessRequest(BaseModel):
    data: str
 
 @app.post("/process")
 def process_data(request: ProcessRequest):
-   # 시퀀스 카운터 증가 (락 사용)
-   counter = tasks_collection.find_one_and_update(
-       {"_id": "counter"},
-       {"$inc": {"value": 1}},
-       upsert=True,
-       return_document=True
-   )
-   sequence = counter["value"]
-   
-   task = process_task.delay(request.data)
-   tasks_collection.insert_one({
-        'task_id': task.id,
-        'sequence': sequence,
-        'status': 'pending',
-        'data': request.data,
-        'created_at': datetime.utcnow(),
-        'completed_at': None,
-        'locked_at': None,
-        'locked_by': None
-    })
-   
-   response = {"task_id": task.id, "data": request.data, "status": "queued"}
-   logger.info(f"Process response: {response}")
-   return response
+    try:
+        # 시퀀스 카운터 증가 (락 사용)
+        counter = tasks_collection.find_one_and_update(
+            {"_id": "counter"},
+            [
+                {
+                    "$set": {
+                        "value": {
+                            "$cond": [
+                                { "$gte": ["$value", 999999] },  # 100만 되면 리셋
+                                1,
+                                { "$add": ["$value", 1] }
+                            ]
+                        }
+                    }
+                }
+            ],
+            upsert=True,
+            return_document=True
+        )
+        sequence = counter["value"]
+
+        task = process_task.delay(request.data, sequence)
+        tasks_collection.insert_one({
+            'task_id': task.id,
+            'sequence': sequence,
+            'status': 'pending',
+            'data': request.data,
+            'created_at': datetime.utcnow(),
+            'completed_at': None,
+            'locked_at': None,
+            'locked_by': None
+        })
+
+        response = {"task_id": task.id, "data": request.data, "status": "queued"}
+        logger.info(f"Process response: {response}")
+        return response
+    except Exception as e:
+        logger.error(f"Error processing request: {e}")
+        return {"status": "error", "message": str(e)}
 
 @app.get("/result/{task_id}")
 def get_result(task_id: str):
