@@ -3,7 +3,7 @@ from pydantic import BaseModel
 import uvicorn
 import logging
 from task import process_task
-from pymongo import MongoClient
+from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
@@ -11,13 +11,13 @@ logger = logging.getLogger(__name__)
 logging.getLogger("uvicorn.access").addFilter(lambda record: "/result" not in record.getMessage())
 logging.getLogger("uvicorn.access").addFilter(lambda record: "/process" not in record.getMessage())
 
-mongo_client = MongoClient('mongodb://localhost:27017/')
+mongo_client = AsyncIOMotorClient('mongodb://localhost:27017/')
 db = mongo_client['task_db']
 tasks_collection = db['tasks']
 app = FastAPI()
 
-def setup_indexes():
-    existing_indexes = tasks_collection.index_information()
+async def setup_indexes():
+    existing_indexes = await tasks_collection.index_information()
 
     # 필요한 인덱스 정의
     required_indexes = [
@@ -37,38 +37,37 @@ def setup_indexes():
     logger.info("Index setup complete.")
 
 @app.on_event("startup")
-def startup_event():
-    setup_indexes()
+async def startup_event():
+    await setup_indexes()
 
 class ProcessRequest(BaseModel):
    data: str
 
 @app.post("/process")
-def process_data(request: ProcessRequest):
+async def process_data(request: ProcessRequest):
     try:
         # 시퀀스 카운터 증가 (락 사용)
-        counter = tasks_collection.find_one_and_update(
-            {"_id": "counter"},
-            [
-                {
-                    "$set": {
-                        "value": {
-                            "$cond": [
-                                { "$gte": ["$value", 999999] },  # 100만 되면 리셋
-                                1,
-                                { "$add": ["$value", 1] }
-                            ]
-                        }
-                    }
-                }
-            ],
-            upsert=True,
-            return_document=True
-        )
+        current = await tasks_collection.find_one({"_id": "counter"})
+        if current and current.get("value", 0) >= 999999:
+            # 최대값 도달시 리셋
+            counter = await tasks_collection.find_one_and_update(
+                {"_id": "counter"},
+                {"$set": {"value": 1}},
+                return_document=True,
+                upsert=True
+            )
+        else:
+            # 값 증가
+            counter = await tasks_collection.find_one_and_update(
+                {"_id": "counter"},
+                {"$inc": {"value": 1}},
+                return_document=True,
+                upsert=True
+            )
         sequence = counter["value"]
 
         task = process_task.delay(request.data, sequence)
-        tasks_collection.insert_one({
+        await tasks_collection.insert_one({
             'task_id': task.id,
             'sequence': sequence,
             'status': 'pending',
@@ -87,7 +86,7 @@ def process_data(request: ProcessRequest):
         return {"status": "error", "message": str(e)}
 
 @app.get("/result/{task_id}")
-def get_result(task_id: str):
+async def get_result(task_id: str):
     result = tasks_collection.find_one({'task_id': task_id})
     if result and result.get('status') == 'completed':
         return {"status": "completed", "result": result.get('result')}
