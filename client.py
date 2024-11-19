@@ -3,21 +3,22 @@ from pydantic import BaseModel
 import uvicorn
 import logging
 from task import process_task
-from pymongo import MongoClient
+from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime
+import uuid
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 logging.getLogger("uvicorn.access").addFilter(lambda record: "/result" not in record.getMessage())
 logging.getLogger("uvicorn.access").addFilter(lambda record: "/process" not in record.getMessage())
 
-mongo_client = MongoClient('mongodb://localhost:27017/')
+mongo_client = AsyncIOMotorClient('mongodb://localhost:27017/')
 db = mongo_client['task_db']
 tasks_collection = db['tasks']
 app = FastAPI()
 
-def setup_indexes():
-    existing_indexes = tasks_collection.index_information()
+async def setup_indexes():
+    existing_indexes = await tasks_collection.index_information()
 
     # 필요한 인덱스 정의
     required_indexes = [
@@ -29,7 +30,7 @@ def setup_indexes():
     for index in required_indexes:
         index_name = "_".join([f"{field[0]}_{field[1]}" for field in index["fields"]])
         if index_name not in existing_indexes:
-            tasks_collection.create_index(index["fields"], **index["options"])
+            await tasks_collection.create_index(index["fields"], **index["options"])
             logger.info(f"Index {index_name} created successfully.")
         else:
             logger.info(f"Index {index_name} already exists.")
@@ -37,17 +38,17 @@ def setup_indexes():
     logger.info("Index setup complete.")
 
 @app.on_event("startup")
-def startup_event():
-    setup_indexes()
+async def startup_event():
+    await setup_indexes()
 
 class ProcessRequest(BaseModel):
    data: str
 
 @app.post("/process")
-def process_data(request: ProcessRequest):
+async def process_data(request: ProcessRequest):
     try:
         # 시퀀스 카운터 증가 (락 사용)
-        current = tasks_collection.find_one({"_id": "counter"})
+        current = await tasks_collection.find_one({"_id": "counter"})
         if current and current.get("value", 0) >= 999999:
             counter = tasks_collection.find_one_and_update(
                 {"_id": "counter"},
@@ -56,7 +57,7 @@ def process_data(request: ProcessRequest):
                 upsert=True
             )
         else:
-            counter = tasks_collection.find_one_and_update(
+            counter = await tasks_collection.find_one_and_update(
                 {"_id": "counter"},
                 {"$inc": {"value": 1}},
                 return_document=True,
@@ -64,9 +65,10 @@ def process_data(request: ProcessRequest):
             )
         sequence = counter["value"]
 
-        task = process_task.delay(request.data, sequence)
-        tasks_collection.insert_one({
-            'task_id': task.id,
+        # Dramatiq 태스크 등록
+        task_id = str(uuid.uuid4())
+        await tasks_collection.insert_one({
+            'task_id': task_id,
             'sequence': sequence,
             'status': 'pending',
             'data': request.data,
@@ -75,8 +77,9 @@ def process_data(request: ProcessRequest):
             'locked_at': None,
             'locked_by': None
         })
+        process_task.send(request.data, task_id)
 
-        response = {"task_id": task.id, "data": request.data, "status": "queued"}
+        response = {"task_id": task_id, "data": request.data, "status": "queued"}
         logger.info(f"Process response: {response}")
         return response
     except Exception as e:
@@ -84,8 +87,8 @@ def process_data(request: ProcessRequest):
         return {"status": "error", "message": str(e)}
 
 @app.get("/result/{task_id}")
-def get_result(task_id: str):
-    result = tasks_collection.find_one({'task_id': task_id})
+async def get_result(task_id: str):
+    result = await tasks_collection.find_one({'task_id': task_id})
     if result and result.get('status') == 'completed':
         return {"status": "completed", "result": result.get('result')}
     return {"status": "processing"}

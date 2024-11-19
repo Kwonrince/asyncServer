@@ -9,7 +9,7 @@ run_client:
 	uvicorn client:app --reload --port 8010
 
 run_celery:
-	celery -A task worker --loglevel=info --concurrency=4
+	dramatiq task --processes 2 --thread 2
 
 run_server:
 	uvicorn server:app --reload --port 8012

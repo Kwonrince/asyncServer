@@ -1,66 +1,67 @@
-from celery import Celery, signals
-from pymongo import MongoClient
+import dramatiq
+from dramatiq.brokers.rabbitmq import RabbitmqBroker
+from dramatiq.middleware import AsyncIO, Middleware
+from motor.motor_asyncio import AsyncIOMotorClient
 import requests
 from datetime import datetime
 import logging
+import asyncio
+import httpx
+
+class MessageTrackingMiddleware(Middleware):
+    def before_process_message(self, broker, message):
+        # 메시지 ID를 컨텍스트에 저장
+        self.current_message_id = message.message_id
+
+    def after_process_message(self, broker, message, *, result=None, exception=None):
+        # 메시지 ID를 정리
+        self.current_message_id = None
+
+    def get_message_id(self):
+        return getattr(self, "current_message_id", None)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # MongoDB 설정
-mongo_client = MongoClient("mongodb://localhost:27017/")
+mongo_client = AsyncIOMotorClient("mongodb://localhost:27017/")
 db = mongo_client["task_db"]
 tasks_collection = db["tasks"]
 
-# Celery 설정
-app = Celery('tasks', 
-             broker='amqp://guest:guest@localhost:5672//',
-             backend='mongodb://localhost:27017/celery_results')
-app.conf.update(
-    broker_connection_retry_on_startup=True  # 시작 시 broker 연결 재시도 활성화
-)
+# RabbitMQ 브로커 설정
+rabbitmq_broker = RabbitmqBroker(url="amqp://guest:guest@localhost:5672")
+rabbitmq_broker.add_middleware(AsyncIO())
+rabbitmq_broker.add_middleware(MessageTrackingMiddleware())
+dramatiq.set_broker(rabbitmq_broker)
 
-# MongoDB 연결을 저장할 전역 변수
-_mongo_client = None
-_db = None
-_tasks_collection = None
-
-@signals.worker_process_init.connect
-def init_worker(**kwargs):
-    """Worker 프로세스가 시작될 때 MongoDB 연결 초기화"""
-    global _mongo_client, _db, _tasks_collection
-    _mongo_client = MongoClient("mongodb://localhost:27017/")
-    _db = _mongo_client["task_db"]
-    _tasks_collection = _db["tasks"]
-    logger.info("MongoDB connection initialized for worker")
-
-@signals.worker_process_shutdown.connect
-def shutdown_worker(**kwargs):
-    """Worker 프로세스가 종료될 때 MongoDB 연결 정리"""
-    global _mongo_client
-    if _mongo_client:
-        _mongo_client.close()
-        logger.info("MongoDB connection closed for worker")
+# 미들웨어 확인
+async def get_message_id_from_middleware():
+    for middleware in rabbitmq_broker.middleware:
+        if isinstance(middleware, MessageTrackingMiddleware):
+            return middleware.get_message_id()
+    logger.error("MessageTrackingMiddleware not found.")
+    return None
         
 # Server URL
 SERVER_URL = "http://localhost:8012/process"
 MAX_RETRY_COUNT = 3
 
-@app.task(bind=True)
-def process_task(self, data: str, sequence: int):
+@dramatiq.actor
+async def process_task(data: str, task_id: str):
     try:
         # MongoDB에서 다음 작업 가져오기
-        next_task = _tasks_collection.find_one_and_update(
+        message_id = await get_message_id_from_middleware()
+        next_task = await tasks_collection.find_one_and_update(
             {
                 'status': 'pending',
                 'locked_at': None,
-                'sequence': sequence
+                'task_id': task_id
             },
             {
                 '$set': {
                     'status': 'processing',
                     'locked_at': datetime.utcnow(),
-                    'locked_by': self.request.id
+                    'locked_by': message_id
                 }
             },
             return_document=True
@@ -72,15 +73,16 @@ def process_task(self, data: str, sequence: int):
 
         # Server로 작업 전송
         try:
-            response = requests.post(SERVER_URL, json={"task_id": next_task['task_id'], "data": data})
-            response.raise_for_status()  # HTTP 오류 발생 시 예외 처리
-            result = response.json()
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(SERVER_URL, json={"task_id": next_task['task_id'], "data": data})
+                response.raise_for_status()  # HTTP 오류 발생 시 예외 처리
+                result = response.json()
 
             # 작업 완료 처리
-            _tasks_collection.update_one(
+            await tasks_collection.update_one(
                 {
                     '_id': next_task['_id'],
-                    'locked_by': self.request.id
+                    'locked_by': message_id
                 },
                 {
                     '$set': {
@@ -93,39 +95,39 @@ def process_task(self, data: str, sequence: int):
                 }
             )
             logger.info(f"Task {next_task['task_id']} completed successfully.")
-            return {'status': 'success', 'task_id': next_task['task_id']}
+            return None
 
         except Exception as e:
             # 작업 실패 복구 및 celery 태스크 재등록
             retry_count = next_task.get('retry_count', 0)
             if retry_count + 1 > MAX_RETRY_COUNT:
-                _tasks_collection.update_one(
+                await tasks_collection.update_one(
                     {'_id': next_task['_id']},
                     {
                         '$set': {
                             'status': 'failed',
                             'locked_at': None,
-                            'locked_by': None,
                             'error_message': f"Max retries exceeded: {e}"
                         }
                     }
                 )
                 logger.error(f"Task {next_task['task_id']} permanently failed after {MAX_RETRY_COUNT} retries.")
                 return {'status': 'failed', 'task_id': next_task['task_id'], 'error': str(e)}
-            _tasks_collection.update_one(
-                {'_id': next_task['_id']},
-                {
-                    '$set': {
-                        'status': 'pending',
-                        'locked_at': None,
-                        'locked_by': None,
-                    },
-                    '$inc': {'retry_count': 1}  # 재시도 횟수 증가
-                }
-            )
-            process_task.apply_async(kwargs={"data": next_task['data'], "sequence": next_task['sequence']}, countdown=60)
-            logger.error(f"Task {next_task['task_id']} failed. Retrying {retry_count + 1}/{MAX_RETRY_COUNT}: {e}")
-            return {'status': 'error', 'task_id': next_task['task_id'], 'retry_count': retry_count + 1, 'error': str(e)}
+            else:
+                await tasks_collection.update_one(
+                    {'_id': next_task['_id']},
+                    {
+                        '$set': {
+                            'status': 'pending',
+                            'locked_at': None,
+                            'locked_by': None,
+                        },
+                        '$inc': {'retry_count': 1}  # 재시도 횟수 증가
+                    }
+                )
+                process_task.send_with_options(args=(data, task_id), delay=60000)
+                logger.error(f"Task {next_task['task_id']} failed. Retrying {retry_count + 1}/{MAX_RETRY_COUNT}: {e}")
+                return {'status': 'error', 'task_id': next_task['task_id'], 'retry_count': retry_count + 1, 'error': str(e)}
 
     except Exception as e:
         logger.error(f"Error processing task: {e}")
