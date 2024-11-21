@@ -40,7 +40,7 @@ def shutdown_worker(**kwargs):
         
 
 @app.task(bind=True)
-def process_task(self, data: str, sequence: int):
+def process_task(self, data: str):
     try:
         next_task = lock_task(self.request.id)
         if not next_task:

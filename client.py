@@ -64,7 +64,7 @@ def process_data(request: ProcessRequest):
             )
         sequence = counter["value"]
 
-        task = process_task.delay(request.data, sequence)
+        task = process_task.delay(request.data)
         tasks_collection.insert_one({
             'task_id': task.id,
             'sequence': sequence,
