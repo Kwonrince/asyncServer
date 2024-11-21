@@ -61,6 +61,7 @@ def lock_task(request_id):
         {
             'status': 'pending',
             'locked_at': None,
+            'task_id': request_id
         },
         {
             '$set': {

@@ -26,16 +26,24 @@ class RequestClient:
             logger.error(f"Failed to process data: {data}, error: {str(e)}")
             return {"data": data, "error": str(e)}
 
-    def process_multiple(self, data_list: List[str]):
+    def process_parallel(self, data_list: List[str]):
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = [executor.submit(self.send_request, data) for data in data_list]
             results = [future.result() for future in concurrent.futures.as_completed(futures)]
+        return results
+    
+    def process_sequential(self, data_list: List[str]):
+        # 순차적으로 처리
+        results = []
+        for data in data_list:
+            result = self.send_request(data)
+            results.append(result)
         return results
 
 if __name__ == "__main__":
     client = RequestClient("http://localhost:8010", max_workers=4)
     data_list = [f"test_data_{i}" for i in range(0,100)]
-    results = client.process_multiple(data_list)
+    results = client.process_sequential(data_list)
     
     for result in results:
         logging.info(result)
