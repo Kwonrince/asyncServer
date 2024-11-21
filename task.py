@@ -42,7 +42,7 @@ def shutdown_worker(**kwargs):
 @app.task(bind=True)
 def process_task(self, data: str, sequence: int):
     try:
-        next_task = lock_task(sequence, self.request.id)
+        next_task = lock_task(self.request.id)
         if not next_task:
             logger.info("No pending tasks found.")
             return None
@@ -56,12 +56,11 @@ def process_task(self, data: str, sequence: int):
         handle_task_failure(self, next_task, e)
         return {'status': 'error', 'task_id': next_task.get('task_id') if next_task else None, 'error': str(e)}
 
-def lock_task(sequence, request_id):
+def lock_task(request_id):
     return _tasks_collection.find_one_and_update(
         {
             'status': 'pending',
             'locked_at': None,
-            'sequence': sequence
         },
         {
             '$set': {
@@ -70,6 +69,7 @@ def lock_task(sequence, request_id):
                 'locked_by': request_id
             }
         },
+        sort=[('sequence', 1)],
         return_document=True
     )
 
@@ -90,7 +90,6 @@ def complete_task(task, result):
             '$set': {
                 'status': 'completed',
                 'completed_at': datetime.utcnow(),
-                'locked_at': None,
                 'result': result.get('result', 'No result returned')
             }
         }
