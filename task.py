@@ -126,5 +126,5 @@ def handle_task_failure(self, task, exception):
                 '$inc': {'retry_count': 1}
             }
         )
-        process_task.apply_async(kwargs={"data": task['data'], "sequence": task['sequence']}, countdown=60)
+        process_task.apply_async(kwargs={"data": task['data'], "sequence": task['sequence']}, task_id=task['task_id'], countdown=60)
         logger.error(f"Task {task['task_id']} failed. Retrying {retry_count + 1}/{MAX_RETRY_COUNT}: {exception}")
